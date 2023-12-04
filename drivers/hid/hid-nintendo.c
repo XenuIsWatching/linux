@@ -552,7 +552,8 @@ static const char * const joycon_player_led_names[] = {
 	LED_FUNCTION_PLAYER4,
 };
 #define JC_NUM_LEDS		ARRAY_SIZE(joycon_player_led_names)
-#define JC_NUM_LED_PATTERNS 8
+#define JC_NUM_LED_PATTERNS	9
+#define JC_LED_DEF_PATTERN	8
 /* Taken from https://www.nintendo.com/my/support/qa/detail/33822 */
 static const enum led_brightness joycon_player_led_patterns[JC_NUM_LED_PATTERNS][JC_NUM_LEDS] = {
 	{ 1, 0, 0, 0 },
@@ -563,7 +564,12 @@ static const enum led_brightness joycon_player_led_patterns[JC_NUM_LED_PATTERNS]
 	{ 1, 0, 1, 0 },
 	{ 1, 0, 1, 1 },
 	{ 0, 1, 1, 0 },
+	{ 1, 1, 1, 1 }, /* >8 players */
 };
+
+/* Used to set the number of leds on each controller */
+static DEFINE_SPINLOCK(joycon_input_bm_spinlock);
+static int jc_input_free_bm = GENMASK(7, 0);
 
 /* Each physical controller is associated with a joycon_ctlr struct */
 struct joycon_ctlr {
@@ -633,6 +639,9 @@ struct joycon_ctlr {
 	unsigned int imu_delta_samples_count;
 	unsigned int imu_delta_samples_sum;
 	unsigned int imu_avg_delta_ms;
+
+	/* led */
+	int player_led_pattern;
 };
 
 /* Helper macros for checking controller type */
@@ -2270,7 +2279,6 @@ static int joycon_home_led_brightness_set(struct led_classdev *led,
 	return ret;
 }
 
-static DEFINE_SPINLOCK(joycon_input_num_spinlock);
 static int joycon_leds_create(struct joycon_ctlr *ctlr)
 {
 	struct hid_device *hdev = ctlr->hdev;
@@ -2282,17 +2290,25 @@ static int joycon_leds_create(struct joycon_ctlr *ctlr)
 	int ret;
 	int i;
 	unsigned long flags;
-	int player_led_pattern;
-	static int input_num;
 
 	/*
-	 * Set the player leds based on controller number
-	 * Because there is no standard concept of "player number", the pattern
-	 * number will simply increase by 1 every time a controller is connected.
+	 * Set the player leds based on a free slot. If there
+	 * are more than 8 controllers. Then load the default
+	 * pattern.
 	 */
-	spin_lock_irqsave(&joycon_input_num_spinlock, flags);
-	player_led_pattern = input_num++ % JC_NUM_LED_PATTERNS;
-	spin_unlock_irqrestore(&joycon_input_num_spinlock, flags);
+	spin_lock_irqsave(&joycon_input_bm_spinlock, flags);
+	if (!jc_input_free_bm) {
+		ctlr->player_led_pattern = JC_LED_DEF_PATTERN;
+	} else {
+		ctlr->player_led_pattern = ffs(jc_input_free_bm) - 1;
+		jc_input_free_bm &= ~(BIT(ctlr->player_led_pattern));
+	}
+	spin_unlock_irqrestore(&joycon_input_bm_spinlock, flags);
+	if (ctlr->player_led_pattern == JC_LED_DEF_PATTERN) {
+		hid_info(ctlr->hdev, "more than 8 controllers connected, assigning default led pattern");
+	} else {
+		hid_info(ctlr->hdev, "assigned player %d led pattern", ctlr->player_led_pattern + 1);
+	}
 
 	/* configure the player LEDs */
 	for (i = 0; i < JC_NUM_LEDS; i++) {
@@ -2305,13 +2321,13 @@ static int joycon_leds_create(struct joycon_ctlr *ctlr)
 
 		led = &ctlr->leds[i];
 		led->name = name;
-		led->brightness = joycon_player_led_patterns[player_led_pattern][i];
+		led->brightness = joycon_player_led_patterns[ctlr->player_led_pattern][i];
 		led->max_brightness = 1;
 		led->brightness_set_blocking =
 					joycon_player_led_brightness_set;
 		led->flags = LED_CORE_SUSPENDRESUME | LED_HW_PLUGGABLE;
 
-		led_val |= joycon_player_led_patterns[player_led_pattern][i] << i;
+		led_val |= joycon_player_led_patterns[ctlr->player_led_pattern][i] << i;
 	}
 	mutex_lock(&ctlr->output_mutex);
 	ret = joycon_set_player_leds(ctlr, 0, led_val);
@@ -2774,6 +2790,12 @@ static void nintendo_hid_remove(struct hid_device *hdev)
 	spin_lock_irqsave(&ctlr->lock, flags);
 	ctlr->ctlr_state = JOYCON_CTLR_STATE_REMOVED;
 	spin_unlock_irqrestore(&ctlr->lock, flags);
+
+	/* Controller removed, so free the slot */
+	spin_lock_irqsave(&joycon_input_bm_spinlock, flags);
+	if (ctlr->player_led_pattern != JC_LED_DEF_PATTERN)
+		jc_input_free_bm |= BIT(ctlr->player_led_pattern);
+	spin_unlock_irqrestore(&joycon_input_bm_spinlock, flags);
 
 	destroy_workqueue(ctlr->rumble_queue);
 
