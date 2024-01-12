@@ -1951,7 +1951,9 @@ static int joycon_leds_create(struct joycon_ctlr *ctlr)
 		hid_warn(hdev, "Failed to allocate player ID, skipping; ret=%d\n", ret);
 		goto home_led;
 	}
-	ctlr->player_id = ret % JC_NUM_LED_PATTERNS;
+	ctlr->player_id = ret;
+	hid_info(ctlr->hdev, "assigned player %d led pattern",
+		(ctlr->player_id % JC_NUM_LED_PATTERNS) + 1);
 
 	for (i = 0; i < JC_NUM_LEDS; i++) {
 		name = devm_kasprintf(dev, GFP_KERNEL, "%s:%s:%s",
@@ -1963,13 +1965,15 @@ static int joycon_leds_create(struct joycon_ctlr *ctlr)
 
 		led = &ctlr->leds[i];
 		led->name = name;
-		led->brightness = joycon_player_led_patterns[ctlr->player_id][i];
+		led->brightness = joycon_player_led_patterns[ctlr->player_id %
+			JC_NUM_LED_PATTERNS][i];
 		led->max_brightness = 1;
 		led->brightness_set_blocking =
 					joycon_player_led_brightness_set;
 		led->flags = LED_CORE_SUSPENDRESUME | LED_HW_PLUGGABLE;
 
-		led_val |= joycon_player_led_patterns[ctlr->player_id][i] << i;
+		led_val |= joycon_player_led_patterns[ctlr->player_id %
+			JC_NUM_LED_PATTERNS][i] << i;
 	}
 	mutex_lock(&ctlr->output_mutex);
 	ret = joycon_set_player_leds(ctlr, 0, led_val);
